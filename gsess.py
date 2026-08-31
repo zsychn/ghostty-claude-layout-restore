@@ -25,7 +25,7 @@ Requires: macOS, Ghostty >= 1.3.0 (AppleScript support), Python 3.8+.
 No third-party dependencies.
 """
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 import argparse
 import json
@@ -282,6 +282,12 @@ def live_claude_sessions():
         try:
             os.kill(int(pid), 0)          # signal 0 = liveness probe
         except (OSError, ValueError):
+            continue
+        # Liveness alone is not enough: a stale sessions/<pid>.json plus a
+        # recycled pid would mark a dead session "running", and restore would
+        # skip it - losing it silently. Confirm the pid is actually claude.
+        cmdline = procs.get(int(pid), "")
+        if cmdline and "claude" not in cmdline.lower():
             continue
         out[sid] = {"pid": pid, "session_id": sid, "cwd": d.get("cwd"),
                     "name": d.get("name"),
@@ -659,8 +665,53 @@ def pane_command(pane, shell="zsh", use_flags=True, claude_bin=None):
     argv = [claude_bin or claude_binary() or "claude", "--resume", sid]
     if use_flags:
         argv += [f for f in (pane.get("flags") or []) if isinstance(f, str)]
-    inner = "%s; exec %s -l" % (" ".join(shlex.quote(a) for a in argv), shell)
-    return "%s -lc %s" % (shell, shlex.quote(inner))
+
+    # Leave the resume command behind for when Claude is quit. A pane started
+    # through Ghostty's `command:` never routes through the shell's input
+    # line, so unlike a hand-typed command it lands in neither the scrollback
+    # nor the history - quit Claude and you face a shell with no idea what it
+    # was, and no way back to the conversation.
+    #
+    # Printing it is not enough: `exec <shell> -l` starts an interactive shell
+    # whose startup repaints the screen and wipes anything printed before it
+    # (verified with oh-my-zsh). History survives that, and Up-arrow is where
+    # someone actually looks. Both are emitted; history is the one that works.
+    steps = [" ".join(shlex.quote(a) for a in argv)]
+    display = _resume_display(sid, pane, use_flags)
+    hist = _history_snippet(display, shell)
+    if hist:
+        steps.append(hist)
+    steps.append('echo; echo "[gsess] %s"' % display)
+    steps.append("exec %s -l" % shell)
+    return "%s -lc %s" % (shell, shlex.quote("; ".join(steps)))
+
+
+def _resume_display(sid, pane, use_flags):
+    """The command to hand back to the user - safe to sit inside "..."."""
+    out = "claude --resume " + sid
+    extra = [f for f in (pane.get("flags") or []) if isinstance(f, str)]
+    if use_flags and extra and all(
+            not set(f) & set('"\\$`\'') for f in extra):
+        out += " " + " ".join(extra)
+    return out
+
+
+def _history_snippet(display, shell):
+    """Append `display` to the user's shell history file.
+
+    zsh reads the extended `: <epoch>:<elapsed>;<cmd>` form whether or not
+    EXTENDED_HISTORY is set for writing, so emitting it is safe either way.
+    Uses echo rather than printf so no backslash escape has to survive being
+    wrapped in the single-quoted -c argument, and only double quotes appear
+    inside it.
+    """
+    if shell == "zsh":
+        return ('H="${HISTFILE:-$HOME/.zsh_history}"; '
+                'echo ": $(date +%s):0;' + display + '" >> "$H" 2>/dev/null')
+    if shell == "bash":
+        return ('H="${HISTFILE:-$HOME/.bash_history}"; '
+                'echo "' + display + '" >> "$H" 2>/dev/null')
+    return None
 
 
 def surface_cfg(pane, shell="zsh", use_flags=True, claude_bin=None):

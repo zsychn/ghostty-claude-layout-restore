@@ -151,6 +151,16 @@ If your install lives somewhere unusual:
 GSESS_CLAUDE_BIN=/path/to/claude gsess restore
 ```
 
+### Getting back in after you quit
+
+Quit Claude in a restored pane and you land in a shell with no trace of how you
+got there — a pane started through Ghostty's `command:` never passed through
+the shell's input line, so the resume command is in neither the scrollback nor
+the history. gsess appends it to your shell history (zsh and bash), so
+**Up-arrow brings it back**. It also prints the command on exit, though an
+interactive shell's startup often repaints over that — history is the part you
+can rely on.
+
 ## What is and isn't restored
 
 Restored: window/tab/split structure, the selected tab, each pane's working
@@ -192,7 +202,7 @@ won't open a second copy of a live conversation. `--force` if you want that.
 python3 -m unittest discover -s tests -v
 ```
 
-44 tests, no Ghostty and no macOS needed — the AppleScript dump goes in as a
+54 tests, no Ghostty and no macOS needed — the AppleScript dump goes in as a
 string and the session store as a dict.
 
 ## License

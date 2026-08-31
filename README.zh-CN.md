@@ -138,6 +138,14 @@ error: Not authorized to send Apple events to Ghostty. (-1743)
 GSESS_CLAUDE_BIN=/path/to/claude gsess restore
 ```
 
+### 退出之后怎么回去
+
+在恢复出来的分屏里退出 Claude，你会落到一个什么都不知道的 shell ——
+通过 Ghostty `command:` 拉起来的分屏，那条命令从来没经过 shell 的输入行，
+所以既不在滚动历史里、也不在 shell 历史里。gsess 会把它追加进你的 shell 历史
+（zsh 和 bash），所以**按 ↑ 就能找回来**。它也会在退出时打印一遍，
+但交互式 shell 启动时经常会重绘覆盖掉 —— 靠得住的是历史那份。
+
 ## 恢复什么、不恢复什么
 
 会恢复：窗口/tab/分屏结构、原来选中的 tab、每个分屏的工作目录、带原始 flags 的
@@ -174,7 +182,7 @@ GSESS_CLAUDE_BIN=/path/to/claude gsess restore
 python3 -m unittest discover -s tests -v
 ```
 
-44 个测试，不需要 Ghostty，也不需要 macOS —— AppleScript 的输出以字符串喂进去，
+54 个测试，不需要 Ghostty，也不需要 macOS —— AppleScript 的输出以字符串喂进去，
 会话库以 dict 传入。
 
 ## 许可

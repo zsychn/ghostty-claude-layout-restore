@@ -9,6 +9,7 @@ no Ghostty, no macOS, no ~/.claude required.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,6 +20,18 @@ FS, RS = gsess.FS, gsess.RS
 SID_A = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
 SID_B = "9f8e7d6c-5b4a-4392-8817-6f5e4d3c2b1a"
 CWD = "/Users/x/code/proj"
+STUB_CLAUDE = "/bin/echo"          # exists and is executable everywhere
+
+
+def setUpModule():
+    """Pin the claude lookup.
+
+    pane_command() resolves the binary when not given one, and the real
+    resolver may fall through to `$SHELL -ic 'command -v claude'` - an
+    interactive shell startup, seconds per call. Pinning it keeps the suite
+    hermetic and in the milliseconds.
+    """
+    gsess._CLAUDE_BIN[:] = [STUB_CLAUDE]
 
 
 def rec(w_ord, w_id, t_idx, t_id, t_name, t_sel, s_ord, s_id, cwd, s_name):
@@ -313,9 +326,84 @@ class TestClaudeBinary(unittest.TestCase):
         s = gsess.build_script(windows, claude_bin="/opt/x/bin/claude")
         self.assertEqual(s.count("/opt/x/bin/claude"), 2)
 
-    def test_resolver_returns_an_absolute_path_or_none(self):
-        found = gsess.claude_binary(refresh=True)
-        self.assertTrue(found is None or os.path.isabs(found), found)
+    def test_env_override_wins(self):
+        """Deterministic: never shells out (an interactive probe costs seconds)."""
+        os.environ["GSESS_CLAUDE_BIN"] = "/bin/sh"
+        try:
+            self.assertEqual(gsess.claude_binary(refresh=True), "/bin/sh")
+        finally:
+            os.environ.pop("GSESS_CLAUDE_BIN", None)
+            gsess._CLAUDE_BIN[:] = [STUB_CLAUDE]
+
+    def test_env_override_ignored_when_not_executable(self):
+        """Falls through to the other strategies. Both the PATH lookup and the
+        interactive-shell probe are stubbed - the real probe costs seconds."""
+        os.environ["GSESS_CLAUDE_BIN"] = "/definitely/not/here"
+        empty = type("R", (), {"stdout": ""})()
+        try:
+            with mock.patch.object(gsess.shutil, "which", return_value=None), \
+                 mock.patch.object(gsess.subprocess, "run", return_value=empty):
+                found = gsess.claude_binary(refresh=True)
+            self.assertNotEqual(found, "/definitely/not/here")
+        finally:
+            os.environ.pop("GSESS_CLAUDE_BIN", None)
+            gsess._CLAUDE_BIN[:] = [STUB_CLAUDE]
+
+
+class TestResumeHint(unittest.TestCase):
+    """A pane started via Ghostty's `command:` never goes through the shell's
+    input line, so the resume command lands in neither scrollback nor history.
+    Quit Claude and there is no way back to the conversation."""
+
+    def test_command_stays_on_one_line(self):
+        # a newline inside the AppleScript command string breaks parsing
+        self.assertNotIn("\n", gsess.pane_command({"session_id": SID_A,
+                                                   "cwd": "/tmp"}))
+
+    def test_snippet_has_no_single_quote(self):
+        # the whole command is wrapped in '...'; one single quote breaks it
+        snip = gsess._history_snippet("claude --resume X", "zsh")
+        self.assertNotIn("'", snip)
+
+    def test_zsh_uses_extended_history_format(self):
+        snip = gsess._history_snippet("claude --resume X", "zsh")
+        self.assertIn(": $(date +%s):0;claude --resume X", snip)
+        self.assertIn("HISTFILE", snip)
+
+    def test_bash_writes_plain_line(self):
+        snip = gsess._history_snippet("claude --resume X", "bash")
+        self.assertIn("bash_history", snip)
+        self.assertNotIn("date +%s", snip)
+
+    def test_unsupported_shell_gets_no_snippet(self):
+        self.assertIsNone(gsess._history_snippet("x", "fish"))
+
+    def test_display_keeps_safe_flags(self):
+        d = gsess._resume_display(SID_A, {"flags": ["--model", "sonnet"]}, True)
+        self.assertEqual(d, "claude --resume %s --model sonnet" % SID_A)
+
+    def test_display_drops_flags_that_would_break_quoting(self):
+        for bad in ['a"b', "a'b", "a$b", "a`b"]:
+            d = gsess._resume_display(SID_A, {"flags": ["--x", bad]}, True)
+            self.assertEqual(d, "claude --resume " + SID_A, bad)
+
+    def test_pane_command_writes_history(self):
+        cmd = gsess.pane_command({"session_id": SID_A, "cwd": "/tmp"})
+        self.assertIn("zsh_history", cmd)
+
+
+class TestPidReuse(unittest.TestCase):
+    """os.kill(pid, 0) proves a pid is taken, not that it is claude. A stale
+    sessions/<pid>.json plus a recycled pid would mark a dead session running,
+    and restore would skip it - losing it silently."""
+
+    def test_identity_check_is_present(self):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "gsess.py"), encoding="utf-8").read()
+        probe = src[src.index("signal 0 = liveness probe"):]
+        probe = probe[:probe.index("out[sid]")]
+        self.assertIn("claude", probe.lower())
+        self.assertIn("procs.get", probe)
 
 
 class TestCounting(unittest.TestCase):
