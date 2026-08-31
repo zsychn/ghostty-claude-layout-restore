@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gsess"
-version = "0.1.0"
-description = "Save and restore Ghostty tabs/splits including the Claude Code session in each pane"
+name = "ghostty-claude-layout-restore"
+version = "0.2.0"
+description = "Save and restore Ghostty windows/tabs/splits including the Claude Code session in each pane"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -22,8 +22,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/zsychn/gsess"
-Issues = "https://github.com/zsychn/gsess/issues"
+Homepage = "https://github.com/zsychn/ghostty-claude-layout-restore"
+Issues = "https://github.com/zsychn/ghostty-claude-layout-restore/issues"
 
 [project.scripts]
 gsess = "gsess:main"

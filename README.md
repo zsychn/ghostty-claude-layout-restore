@@ -1,120 +1,142 @@
-# gsess
+# ghostty-claude-layout-restore
 
-Save and restore your Ghostty workspace — windows, tabs, splits, **and the
-Claude Code session that was running in each pane**.
+Save and restore your Ghostty workspace — windows, tabs, **splits**, and the
+Claude Code session that was running in each pane.
 
 ```console
 $ gsess save
-saved: 1 window(s) / 5 tab(s) / 8 pane(s) / 8 Claude session(s) -> ~/.local/state/gsess/state.json
+saved: 1 window(s) / 5 tab(s) / 8 pane(s) / 8 Claude session(s)
 
-# ...quit Ghostty, reboot, come back...
-
-$ gsess restore
-will restore: 1 window(s) / 5 tab(s) / 8 pane(s) / 8 session(s)
-restoring ...
-done.
+# ...quit Ghostty, reboot, come back, open a terminal...
+# every pane is back in its own directory, running `claude --resume <its own id>`
 ```
 
-Every pane comes back in its own directory with `claude --resume <its own id>`
-already running.
+The CLI is `gsess`.
 
-## Why
+## Why another one of these
 
-Two halves of this problem are already solved, and they don't talk to each other:
+[`ghostty-claude-code-session-restore`](https://github.com/AtAFork/ghostty-claude-code-session-restore)
+got here first and does the core idea well — if it covers your setup, use it.
+This tool exists for one reason: **it restores splits.**
 
-- Ghostty's `window-save-state` restores the *shape* of a workspace, but every
-  pane comes back as an empty shell.
-- `claude --resume <id>` restores a *conversation*, but only if you know which
-  conversation belonged in which pane.
+That project drives Ghostty by sending `Cmd+T` through System Events and typing
+the command into the new tab. That predates Ghostty 1.3.0 (March 2026), which
+added a real AppleScript dictionary with a `split` command. So a tab that had
+four panes comes back as four separate tabs, and multi-window layouts are
+flattened — its README says as much.
 
-Anthropic closed the built-in version of this as not planned
-([claude-code#43262](https://github.com/anthropics/claude-code/issues/43262)).
-gsess is the piece in between.
+If your workspace is a flat list of tabs, that difference doesn't matter and
+the other tool gives you Codex and Cmux support, which this one doesn't.
+
+| | AtAFork | this |
+|---|---|---|
+| splits / multi-window | flattened into tabs | **preserved** |
+| how tabs are made | `Cmd+T` via System Events, command typed in | native AppleScript `command:` |
+| macOS permission | Accessibility | Automation |
+| Codex, Cmux | ✅ | ❌ Claude Code only |
+| install | ~40 lines into your shell rc | one symlink + 6 lines |
 
 ## Install
 
-Requires macOS, **Ghostty ≥ 1.3.0** (for AppleScript support), and Python 3.8+.
-No third-party dependencies.
+macOS, **Ghostty ≥ 1.3.0**, Python 3.8+. No third-party dependencies.
 
 ```bash
-git clone https://github.com/zsychn/gsess.git
-cd gsess
-ln -s "$PWD/gsess.py" /usr/local/bin/gsess    # or anywhere on your PATH
+git clone https://github.com/zsychn/ghostty-claude-layout-restore.git
+cd ghostty-claude-layout-restore
+ln -s "$PWD/gsess.py" /usr/local/bin/gsess
 ```
 
-The first run asks macOS for permission to control Ghostty (Automation). No
-Accessibility permission is needed.
+Then turn on the two automatic halves:
+
+```bash
+gsess agent install                        # snapshots every 30s
+gsess shell-init zsh >> ~/.zshrc           # restores after Ghostty was quit
+```
+
+`shell-init` also takes `bash` and `fish`. The first run asks for permission to
+control Ghostty (Automation).
 
 ## Usage
 
 ```
 gsess save                  snapshot the current workspace
 gsess status                current workspace vs. latest snapshot
-gsess restore               recreate it
+gsess restore               recreate it (new windows)
 gsess restore --dry-run     print the AppleScript, run nothing
+gsess autorestore           recreate it *around the calling shell* (used by shell-init)
 gsess list                  snapshot history
-gsess agent install         launchd timer, snapshots every 60s
-gsess agent uninstall       stop it
+gsess agent install|uninstall|status
+gsess shell-init zsh|bash|fish
 ```
 
-### Surviving a reboot
+### How the automatic path works
 
-A snapshot is only useful if it was taken *before* you quit. Install the timer:
+The launchd timer snapshots every 30s while Ghostty is up. When it notices
+Ghostty has quit — with a populated snapshot behind it — it arms a pending
+marker. Next time you open a Ghostty terminal, the shell snippet sees the
+marker and calls `gsess autorestore`, which:
 
-```bash
-gsess agent install --interval 60
-```
+- builds every other tab, split and window around the shell that called it
+- prints the command for the tab you're already in, which the snippet `eval`s
 
-Two guards keep it from destroying the thing you want to restore:
+so you don't end up with a stray empty window. Restored panes carry
+`GSESS_RESTORED=1`, which stops the snippet from firing inside them (they run
+a login shell, so it would otherwise recurse).
 
-- if Ghostty isn't running, the snapshot is skipped entirely
-- if Ghostty is running but no Claude session is found, the previous snapshot
-  is kept (`--force` to override)
+Three guards keep this from misfiring:
 
-So the state that survives is always your last *populated* workspace, not the
-empty one you left behind.
+- Ghostty not running → snapshot skipped entirely
+- Ghostty running but no Claude session found → previous snapshot kept
+  (`--force` overrides)
+- the marker is claimed with an atomic rename, so opening several tabs at once
+  restores exactly once; and autorestore refuses unless Ghostty is freshly
+  launched (one window, one tab, one pane)
 
-Restore is deliberately manual — a login should not spawn fifteen windows you
+Restore is otherwise manual — a login should not spawn fifteen windows you
 didn't ask for.
 
 ## How pane → session matching works
 
-This is the part that has to be exact, because two panes in the same directory
-are a completely normal thing to have. Three sources, cross-checked:
+This has to be exact: several panes in the same directory is a normal thing to
+have, and it's where directory-based matching quietly breaks. Three sources,
+cross-checked:
 
 1. **Ghostty terminal title** — Claude Code writes the first 16 characters of
-   the session id into the title (`proj · my-session · 1a2b3c4d-5e6f-4a`).
-   This is the only source that can tell two panes in the *same directory*
-   apart, so it's the primary one.
-2. **`~/.claude/sessions/<pid>.json`** — authoritative session id, cwd and
-   display name for sessions whose process is still alive.
+   the session id into it (`proj · my-session · 1a2b3c4d-5e6f-4a`). The only
+   source that separates two panes in the *same* directory, so it leads.
+2. **`~/.claude/sessions/<pid>.json`** — authoritative id, cwd and display name
+   for sessions whose process is alive. Also where the CLI flags come from.
 3. **`~/.claude/projects/<dir>/<session-id>.jsonl`** — expands the 16-char
-   prefix into the full UUID and proves the transcript still exists.
+   prefix to the full UUID and proves the transcript still exists.
 
-`gsess status` shows how each pane was matched. If your terminal title is
-overridden or disabled, gsess falls back to matching by working directory and
-marks those panes `~` — that fallback *cannot* tell same-directory panes apart,
-and it says so rather than silently guessing.
+`gsess status` shows how each pane matched. If your terminal title is
+overridden, it falls back to matching by directory and marks those panes `~` —
+that fallback *cannot* separate same-directory panes, and it says so rather
+than guessing silently.
+
+### Flags are replayed too
+
+A session started as `claude --model sonnet --dangerously-skip-permissions`
+comes back with those flags. Session-selection flags (`--resume`, `--continue`,
+`--fork-session`, …) are dropped, since gsess supplies its own `--resume`, and
+so are positional arguments — replaying an initial prompt would re-send it to
+the model. `restore --no-flags` turns replay off.
 
 ## What is and isn't restored
 
-Restored:
-
-- window / tab / split structure, and which tab was selected
-- each pane's working directory
-- `claude --resume <id>` per pane, in the right directory
-- quitting Claude drops you into a live shell instead of closing the pane
+Restored: window/tab/split structure, the selected tab, each pane's working
+directory, `claude --resume <id>` with the original flags, and a live shell
+when you quit Claude instead of the pane closing.
 
 Not restored:
 
-- **Scrollback** and any non-agent process (a running `npm run dev` does not
+- **Scrollback**, and any non-agent process (a running `npm run dev` doesn't
   come back)
-- **Exact split ratios.** Ghostty's AppleScript API can create splits but not
-  size them, so every split comes back at 50/50.
-- **Split geometry.** The API exposes the panes of a tab but not their layout
-  tree, so the arrangement is reconstructed from a default plan (2 panes →
-  side by side, 4 panes → 2×2 grid). The plan is stored in the snapshot as
-  `split_plan` and can be hand-edited:
+- **Exact split ratios** — Ghostty's AppleScript can create splits but not size
+  them, so every split returns at 50/50
+- **Split arrangement** — the API exposes a tab's panes but not their layout
+  tree, so it's rebuilt from a default (2 panes → side by side, 4 → 2×2 grid),
+  stored in the snapshot as `split_plan` and hand-editable:
 
   ```json
   "split_plan": [[0, "right"], [0, "down"], [1, "down"]]
@@ -122,21 +144,19 @@ Not restored:
 
   Each entry is `[pane_to_split, direction]`, applied in order.
 
-Sessions that are already running are skipped, so `gsess restore` is safe to
-run twice — it won't open a second copy of a live conversation. Use `--force`
-if you really want that.
+Sessions already running are skipped, so `restore` is safe to run twice — it
+won't open a second copy of a live conversation. `--force` if you want that.
 
-## Other tools
+## Also worth knowing about
 
-- [gtab](https://github.com/Franvy/gtab) — named Ghostty workspaces, with more
-  precise split geometry (it reads pane frames via Accessibility). It doesn't
+- [gtab](https://github.com/Franvy/gtab) — named Ghostty workspaces with more
+  precise split geometry (it reads pane frames via Accessibility). Doesn't
   restore running processes, so agent sessions come back empty.
 - [gpane](https://github.com/minorole/gsx) — launches a *predefined* layout with
-  a command per pane. Great for starting a project; it isn't a snapshot of what
-  you actually had open.
-- [tabkeep](https://github.com/rohansx/tabkeep) — same idea, Linux only (reads
-  `/proc`), and resolves sessions by directory, so same-directory panes collapse
-  to one id.
+  a command per pane. Good for starting a project; not a snapshot of what you
+  had open.
+- [tabkeep](https://github.com/rohansx/tabkeep) — same idea on Linux (reads
+  `/proc`); resolves sessions by directory, so same-directory panes collapse.
 
 ## Development
 
@@ -144,7 +164,7 @@ if you really want that.
 python3 -m unittest discover -s tests -v
 ```
 
-29 tests, no Ghostty or macOS required — the AppleScript dump is fed in as a
+47 tests, no Ghostty and no macOS needed — the AppleScript dump goes in as a
 string and the session store as a dict.
 
 ## License

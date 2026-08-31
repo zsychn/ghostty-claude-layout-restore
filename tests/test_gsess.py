@@ -230,6 +230,108 @@ class TestBuildScript(unittest.TestCase):
         self.assertTrue(s.rstrip().endswith("end tell"))
 
 
+class TestExtractFlags(unittest.TestCase):
+    def test_session_selection_flags_are_dropped(self):
+        for cmd in ("claude --resume abc", "claude -r abc", "claude --continue",
+                    "claude -c", "claude --resume", "claude --fork-session"):
+            self.assertEqual(gsess.extract_flags(cmd), [], cmd)
+
+    def test_value_flags_survive_with_their_value(self):
+        self.assertEqual(
+            gsess.extract_flags("claude --continue --model sonnet"),
+            ["--model", "sonnet"])
+
+    def test_boolean_flags_survive(self):
+        self.assertIn("--dangerously-skip-permissions",
+                      gsess.extract_flags(
+                          "claude -r x --dangerously-skip-permissions"))
+
+    def test_inline_value_form(self):
+        self.assertEqual(gsess.extract_flags("claude --effort=max"),
+                         ["--effort=max"])
+
+    def test_initial_prompt_is_not_replayed(self):
+        """Replaying a positional prompt would re-send it to the model."""
+        self.assertEqual(
+            gsess.extract_flags("claude write me a function --model opus"),
+            ["--model", "opus"])
+
+    def test_absolute_executable_path(self):
+        self.assertEqual(gsess.extract_flags("/opt/bin/claude --chrome"),
+                         ["--chrome"])
+
+    def test_unparsable_line_is_not_fatal(self):
+        self.assertEqual(gsess.extract_flags('claude --model "unclosed'), [])
+
+
+class TestFlagReplay(unittest.TestCase):
+    PANE = {"session_id": SID_A, "cwd": "/tmp",
+            "flags": ["--model", "sonnet", "--chrome"]}
+
+    def test_flags_are_replayed_in_order(self):
+        cmd = gsess.pane_command(self.PANE)
+        self.assertIn("claude --resume %s --model sonnet --chrome" % SID_A, cmd)
+
+    def test_no_flags_switch(self):
+        cmd = gsess.pane_command(self.PANE, use_flags=False)
+        self.assertNotIn("--model", cmd)
+
+    def test_argv_string_includes_cd(self):
+        line = gsess.pane_argv_string(self.PANE)
+        self.assertTrue(line.startswith("cd /tmp && claude --resume "))
+        self.assertIn("--model sonnet", line)
+
+    def test_argv_string_empty_without_session(self):
+        self.assertEqual(gsess.pane_argv_string({"session_id": None}), "")
+
+    def test_flag_with_space_is_quoted(self):
+        cmd = gsess.pane_command({"session_id": SID_A,
+                                  "flags": ["--add-dir", "/a b/c"]})
+        self.assertIn("'/a b/c'", cmd)
+
+
+class TestEnvTagging(unittest.TestCase):
+    def test_env_reaches_the_configuration(self):
+        cfg = gsess.surface_cfg({"session_id": SID_A, "cwd": "/tmp"},
+                                env=["GSESS_RESTORED=1"])
+        self.assertIn('environment variables:{"GSESS_RESTORED=1"}', cfg)
+
+    def test_no_env_by_default(self):
+        cfg = gsess.surface_cfg({"session_id": SID_A, "cwd": "/tmp"})
+        self.assertNotIn("environment variables", cfg)
+
+
+class TestReuseFrontWindow(unittest.TestCase):
+    def windows(self):
+        pane = lambda sid: {"cwd": "/tmp", "session_id": sid}
+        return [{"tabs": [
+            {"panes": [pane(SID_A), pane(SID_B)],
+             "split_plan": [[0, "right"]], "selected": True},
+            {"panes": [pane(None)], "split_plan": [], "selected": False},
+        ]}]
+
+    def test_adopts_the_existing_window_instead_of_creating_one(self):
+        s = gsess.build_script(self.windows(), reuse_front=True)
+        self.assertIn("set w0 to front window", s)
+        self.assertNotIn("new window", s)
+        self.assertNotIn("activate window", s)   # we are already in it
+
+    def test_first_pane_is_left_to_the_caller_but_split_still_happens(self):
+        s = gsess.build_script(self.windows(), reuse_front=True)
+        self.assertNotIn(SID_A, s)      # the shell runs this one
+        self.assertIn(SID_B, s)         # split off the adopted pane
+        self.assertEqual(s.count(" split "), 1)
+
+    def test_remaining_tabs_go_into_the_adopted_window(self):
+        s = gsess.build_script(self.windows(), reuse_front=True)
+        self.assertIn("new tab in w0", s)
+
+    def test_normal_mode_still_creates_the_window(self):
+        s = gsess.build_script(self.windows(), reuse_front=False)
+        self.assertIn("new window", s)
+        self.assertIn(SID_A, s)
+
+
 class TestCounting(unittest.TestCase):
     def test_counts(self):
         raw = (rec(1, "w1", 1, "t1", "a", "true", 1, "s1", CWD,
