@@ -131,6 +131,26 @@ comes back with those flags. Session-selection flags (`--resume`, `--continue`,
 replaying an initial prompt would re-send it to the model. `--no-flags` turns
 replay off.
 
+### Finding the `claude` executable
+
+A restored pane runs `zsh -lc ...` — a *login* shell, but not an interactive
+one, so it never sources `.zshrc`. That is where most installs put claude on
+PATH, so calling it by bare name fails with `command not found: claude`, exit
+127, and the `exec zsh -l` tail hands you a perfectly ordinary shell: the
+layout looks restored while every session is silently missing.
+
+gsess therefore resolves an absolute path before building the script, trying
+in order: `$GSESS_CLAUDE_BIN`, `which claude`, `$SHELL -ic 'command -v claude'`
+(an interactive shell *does* read `.zshrc`), then the usual install locations.
+`restore` prints which binary it picked, and refuses to run at all if it cannot
+find one — rather than emitting commands that are certain to fail quietly.
+
+If your install lives somewhere unusual:
+
+```bash
+GSESS_CLAUDE_BIN=/path/to/claude gsess restore
+```
+
 ## What is and isn't restored
 
 Restored: window/tab/split structure, the selected tab, each pane's working
@@ -172,7 +192,7 @@ won't open a second copy of a live conversation. `--force` if you want that.
 python3 -m unittest discover -s tests -v
 ```
 
-39 tests, no Ghostty and no macOS needed — the AppleScript dump goes in as a
+44 tests, no Ghostty and no macOS needed — the AppleScript dump goes in as a
 string and the session store as a dict.
 
 ## License

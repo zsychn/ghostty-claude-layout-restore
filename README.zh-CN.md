@@ -118,6 +118,26 @@ error: Not authorized to send Apple events to Ghostty. (-1743)
 会话选择类的 flag（`--resume`、`--continue` 等）会丢掉，因为 gsess 自己会给；
 位置参数也会丢掉 —— 把当初那句初始 prompt 重放一遍等于又发给模型一次。`--no-flags` 可关掉重放。
 
+### 怎么找到 `claude` 可执行文件
+
+恢复出来的分屏跑的是 `zsh -lc ...` —— 它是 **login shell 但不是交互式的**，
+所以**不会**读 `.zshrc`。而绝大多数安装方式正是靠 `.zshrc` 把 claude 放进 PATH 的。
+于是直接按名字调用会得到 `command not found: claude`、退出码 127，
+后面的 `exec zsh -l` 立刻接班给你一个完全正常的 shell ——
+看上去布局恢复好了，实际上每个会话都悄无声息地没了。
+
+所以 gsess 会在生成脚本前先解析出绝对路径，依次尝试：
+`$GSESS_CLAUDE_BIN` → `which claude` → `$SHELL -ic 'command -v claude'`
+（交互式 shell **会**读 `.zshrc`）→ 常见安装位置。
+`restore` 会打印它选中的可执行文件；一个都找不到时**直接拒绝执行**，
+而不是吐出一堆注定悄悄失败的命令。
+
+如果你的安装位置比较特别：
+
+```bash
+GSESS_CLAUDE_BIN=/path/to/claude gsess restore
+```
+
 ## 恢复什么、不恢复什么
 
 会恢复：窗口/tab/分屏结构、原来选中的 tab、每个分屏的工作目录、带原始 flags 的
@@ -154,7 +174,7 @@ error: Not authorized to send Apple events to Ghostty. (-1743)
 python3 -m unittest discover -s tests -v
 ```
 
-39 个测试，不需要 Ghostty，也不需要 macOS —— AppleScript 的输出以字符串喂进去，
+44 个测试，不需要 Ghostty，也不需要 macOS —— AppleScript 的输出以字符串喂进去，
 会话库以 dict 传入。
 
 ## 许可

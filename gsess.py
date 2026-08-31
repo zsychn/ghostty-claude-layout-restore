@@ -25,13 +25,14 @@ Requires: macOS, Ghostty >= 1.3.0 (AppleScript support), Python 3.8+.
 No third-party dependencies.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import argparse
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -67,6 +68,13 @@ SESSION_SELECT_FLAGS = {
     "--resume", "-r", "--continue", "-c", "--fork-session",
     "--session-id", "--name", "-n", "--cloud", "--from-pr",
 }
+
+# Where claude tends to live, checked last if nothing else resolved it.
+CLAUDE_CANDIDATES = (
+    "~/.local/bin/claude", "~/.claude/local/claude",
+    "/usr/local/bin/claude", "/opt/homebrew/bin/claude",
+    "~/.bun/bin/claude", "~/.npm-global/bin/claude",
+)
 
 
 # --------------------------------------------------------------- i18n
@@ -137,6 +145,11 @@ MSG = {
     "old_ghostty": (
         "Ghostty did not answer AppleScript. gsess needs Ghostty >= 1.3.0.",
         "Ghostty 没有响应 AppleScript。gsess 需要 Ghostty >= 1.3.0。"),
+    "no_claude_bin": (
+        "cannot find the `claude` executable - set GSESS_CLAUDE_BIN to its "
+        "full path and try again",
+        "找不到 `claude` 可执行文件 —— 把它的完整路径设进 GSESS_CLAUDE_BIN 再试"),
+    "using_claude": ("using %s", "使用 %s"),
     "nothing_to_restore": (
         "nothing to restore - every session in the snapshot is already running",
         "没有需要恢复的：快照里的会话都已经在运行了"),
@@ -587,7 +600,54 @@ def cmd_list(args):
 
 # --------------------------------------------------------------- restore
 
-def pane_command(pane, shell="zsh", use_flags=True):
+_CLAUDE_BIN = []
+
+
+def claude_binary(refresh=False):
+    """Absolute path to the `claude` executable, or None.
+
+    This matters more than it looks. A restored pane runs `zsh -lc ...`, which
+    is a *login* shell but not an interactive one, so it never sources
+    .zshrc - and .zshrc is exactly where most installs put claude on PATH.
+    Calling it by bare name there yields `command not found: claude`, exit 127,
+    and the `exec zsh -l` tail then hands the user a perfectly ordinary shell:
+    the layout looks restored while every session is silently missing.
+    """
+    if _CLAUDE_BIN and not refresh:
+        return _CLAUDE_BIN[0]
+    _CLAUDE_BIN.clear()
+
+    def accept(path):
+        if path and os.access(path, os.X_OK) and not os.path.isdir(path):
+            _CLAUDE_BIN.append(path)
+            return True
+        return False
+
+    env = os.environ.get("GSESS_CLAUDE_BIN")
+    if env and accept(os.path.expanduser(env)):
+        return _CLAUDE_BIN[0]
+    if accept(shutil.which("claude") or ""):
+        return _CLAUDE_BIN[0]
+
+    # Ask the user's own interactive shell - it does read .zshrc.
+    shell = os.environ.get("SHELL") or "/bin/zsh"
+    try:
+        out = subprocess.run([shell, "-ic", "command -v claude"],
+                             capture_output=True, text=True, timeout=20).stdout
+        for line in out.splitlines():
+            # shell integration may prefix escape sequences; take from the /
+            if "/" in line and accept(line[line.index("/"):].strip()):
+                return _CLAUDE_BIN[0]
+    except Exception:
+        pass
+
+    for cand in CLAUDE_CANDIDATES:
+        if accept(os.path.expanduser(cand)):
+            return _CLAUDE_BIN[0]
+    return None
+
+
+def pane_command(pane, shell="zsh", use_flags=True, claude_bin=None):
     """Command for a pane, or None for a plain shell.
 
     `exec <shell> -l` after the agent means quitting Claude drops you into a
@@ -596,26 +656,26 @@ def pane_command(pane, shell="zsh", use_flags=True):
     sid = pane.get("session_id")
     if not sid:
         return None
-    argv = ["claude", "--resume", sid]
+    argv = [claude_bin or claude_binary() or "claude", "--resume", sid]
     if use_flags:
         argv += [f for f in (pane.get("flags") or []) if isinstance(f, str)]
     inner = "%s; exec %s -l" % (" ".join(shlex.quote(a) for a in argv), shell)
     return "%s -lc %s" % (shell, shlex.quote(inner))
 
 
-def surface_cfg(pane, shell="zsh", use_flags=True):
+def surface_cfg(pane, shell="zsh", use_flags=True, claude_bin=None):
     parts = []
     cwd = pane.get("cwd")
     if cwd and os.path.isdir(cwd):
         parts.append("initial working directory:%s" % asq(cwd))
-    cmd = pane_command(pane, shell, use_flags)
+    cmd = pane_command(pane, shell, use_flags, claude_bin)
     if cmd:
         parts.append("command:%s" % asq(cmd))
     return ("{" + ", ".join(parts) + "}") if parts else None
 
 
-def with_cfg(pane, shell="zsh", use_flags=True):
-    cfg = surface_cfg(pane, shell, use_flags)
+def with_cfg(pane, shell="zsh", use_flags=True, claude_bin=None):
+    cfg = surface_cfg(pane, shell, use_flags, claude_bin)
     return (" with configuration " + cfg) if cfg else ""
 
 
@@ -649,12 +709,13 @@ def plan_restore(snap, skip_ids, force, check_transcript=True):
     return windows, notes
 
 
-def build_script(windows, shell="zsh", scale=1.0, use_flags=True):
+def build_script(windows, shell="zsh", scale=1.0, use_flags=True,
+                 claude_bin=None):
     def d(x):
         return "  delay %.2f" % (x * scale)
 
     def cfg(pane):
-        return with_cfg(pane, shell, use_flags)
+        return with_cfg(pane, shell, use_flags, claude_bin)
 
     L = ['tell application "Ghostty"']
     for wi, w in enumerate(windows):
@@ -718,8 +779,15 @@ def cmd_restore(args):
     for n in dict.fromkeys(notes):
         print("  ! " + n)
 
+    exe = claude_binary()
+    if count_sessions(windows) and not exe:
+        print(t("no_claude_bin"), file=sys.stderr)
+        return 1
+    if exe and not args.quiet:
+        print(t("using_claude", exe))
+
     script = build_script(windows, args.shell, args.delay_scale,
-                          use_flags=not args.no_flags)
+                          use_flags=not args.no_flags, claude_bin=exe)
 
     if args.dry_run:
         print("\n" + t("dry_run"))
@@ -832,6 +900,7 @@ def build_parser():
                    help="multiply the built-in delays on slow machines")
     s.add_argument("--no-flags", action="store_true",
                    help="do not replay the CLI flags each session ran with")
+    s.add_argument("--quiet", action="store_true")
     s.set_defaults(func=cmd_restore)
     return ap
 

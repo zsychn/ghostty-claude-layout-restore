@@ -282,6 +282,42 @@ class TestFlagReplay(unittest.TestCase):
         self.assertIn("'/a b/c'", cmd)
 
 
+class TestClaudeBinary(unittest.TestCase):
+    """Regression guard for the bug that made restore look like it worked.
+
+    Restored panes run `zsh -lc`, a login-but-not-interactive shell that never
+    sources .zshrc - where most installs put claude on PATH. Calling it by bare
+    name gave `command not found`, exit 127, and the `exec zsh -l` tail left a
+    normal shell behind: layout restored, every session silently gone.
+    """
+
+    def test_absolute_path_is_used_verbatim(self):
+        cmd = gsess.pane_command({"session_id": SID_A},
+                                 claude_bin="/opt/x/bin/claude")
+        self.assertIn("/opt/x/bin/claude --resume %s" % SID_A, cmd)
+
+    def test_bare_name_is_not_used_when_a_path_is_known(self):
+        cmd = gsess.pane_command({"session_id": SID_A},
+                                 claude_bin="/opt/x/bin/claude")
+        self.assertNotIn("'claude --resume", cmd)
+
+    def test_path_with_space_is_quoted(self):
+        cmd = gsess.pane_command({"session_id": SID_A},
+                                 claude_bin="/opt/my apps/claude")
+        self.assertIn("'/opt/my apps/claude'", cmd)
+
+    def test_build_script_threads_the_binary_through_every_pane(self):
+        pane = lambda sid: {"cwd": "/tmp", "session_id": sid}
+        windows = [{"tabs": [{"panes": [pane(SID_A), pane(SID_B)],
+                              "split_plan": [[0, "right"]], "selected": True}]}]
+        s = gsess.build_script(windows, claude_bin="/opt/x/bin/claude")
+        self.assertEqual(s.count("/opt/x/bin/claude"), 2)
+
+    def test_resolver_returns_an_absolute_path_or_none(self):
+        found = gsess.claude_binary(refresh=True)
+        self.assertTrue(found is None or os.path.isabs(found), found)
+
+
 class TestCounting(unittest.TestCase):
     def test_counts(self):
         raw = (rec(1, "w1", 1, "t1", "a", "true", 1, "s1", CWD,
